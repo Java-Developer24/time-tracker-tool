@@ -1,0 +1,16 @@
+{
+  "name": "timetracker-api-server",
+  "version": "1.0.0",
+  "description": "REST + WebSocket middleware between Chrome extension and BigQuery",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google-cloud/bigquery": "^8.1.1",
+    "express": "^4.18.2",
+    "ws": "^8.18.0",
+    "dotenv": "^16.3.1",
+    "cors": "^2.8.5"
+  }
+}
