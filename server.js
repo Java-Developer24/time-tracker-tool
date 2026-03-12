@@ -28,8 +28,49 @@ const OHR_SHEET_CSV_URL = process.env.OHR_SHEET_CSV_URL || `https://docs.google.
 const OHR_TIMESTAMP_WEBHOOK_URL = process.env.OHR_TIMESTAMP_WEBHOOK_URL || '';
 const ALLOW_INSECURE_TLS = process.env.ALLOW_INSECURE_TLS === 'true';
 
+function getBigQueryCredentialsFromEnv() {
+  const rawJson = (process.env.GOOGLE_CREDENTIALS_JSON || '').trim();
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (parsed.private_key) {
+        parsed.private_key = String(parsed.private_key).replace(/\\n/g, '\n');
+      }
+      return {
+        credentials: parsed,
+        source: 'GOOGLE_CREDENTIALS_JSON'
+      };
+    } catch (err) {
+      throw new Error(`Invalid GOOGLE_CREDENTIALS_JSON: ${err.message}`);
+    }
+  }
+
+  const clientEmail = (process.env.GOOGLE_CLIENT_EMAIL || '').trim();
+  const privateKey = process.env.GOOGLE_PRIVATE_KEY || '';
+  if (clientEmail || privateKey) {
+    if (!clientEmail || !privateKey) {
+      throw new Error('Both GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY are required for env-based BigQuery auth.');
+    }
+    return {
+      credentials: {
+        client_email: clientEmail,
+        private_key: privateKey.replace(/\\n/g, '\n')
+      },
+      source: 'GOOGLE_CLIENT_EMAIL/GOOGLE_PRIVATE_KEY'
+    };
+  }
+
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    return { credentials: null, source: 'GOOGLE_APPLICATION_CREDENTIALS (file path)' };
+  }
+  return { credentials: null, source: 'Application Default Credentials' };
+}
+
+const { credentials: bigQueryCredentials, source: bigQueryAuthSource } = getBigQueryCredentialsFromEnv();
+
 const bigquery = new BigQuery({
-  projectId: BQ_PROJECT_ID || undefined
+  projectId: BQ_PROJECT_ID || undefined,
+  credentials: bigQueryCredentials || undefined
 });
 
 function logInfo(message, meta) {
@@ -730,6 +771,7 @@ async function bootstrap() {
   server.listen(PORT, () => {
     logInfo(`[BOOT] Time Tracker API running on port ${PORT}`);
     logInfo(`[BOOT] BigQuery dataset: ${getProjectId()}.${BQ_DATASET}`);
+    logInfo(`[BOOT] BigQuery auth: ${bigQueryAuthSource}`);
     logInfo('[BOOT] WebSocket endpoint: /ws');
     logInfo(`[BOOT] OHR sheet CSV: ${OHR_SHEET_CSV_URL}`);
     logInfo(`[BOOT] VERBOSE_LOGS=${VERBOSE_LOGS ? 'true' : 'false'}`);
