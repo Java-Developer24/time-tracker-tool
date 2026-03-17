@@ -179,15 +179,38 @@ function normalizeDashboardStatus(value) {
   return null;
 }
 
+function unwrapBigQueryScalar(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (typeof value === 'object') {
+    if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+      return value.value;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(value, 'integerValue')) {
+      return value.integerValue;
+    }
+  }
+
+  return value;
+}
+
 function toSafeNumber(value) {
-  const parsed = Number(value);
+  const parsed = Number(unwrapBigQueryScalar(value));
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function toIsoOrNull(value) {
   if (!value) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
+  const unwrapped = unwrapBigQueryScalar(value);
+  const parsed = new Date(unwrapped);
+  return Number.isNaN(parsed.getTime()) ? String(unwrapped) : parsed.toISOString();
 }
 
 function splitCSVLine(line) {

@@ -293,18 +293,32 @@
       el.errorBanner.textContent = message || '';
     }
 
+    function normalizeScalar(value) {
+      if (value && typeof value === 'object') {
+        if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+          return value.value;
+        }
+        if (Object.prototype.hasOwnProperty.call(value, 'integerValue')) {
+          return value.integerValue;
+        }
+      }
+      return value;
+    }
+
     function formatDuration(seconds) {
-      const total = Number(seconds || 0);
+      const total = Number(normalizeScalar(seconds) || 0);
       if (!Number.isFinite(total) || total <= 0) return '0m';
+      if (total < 60) return `${Math.round(total)}s`;
       const hours = Math.floor(total / 3600);
       const minutes = Math.floor((total % 3600) / 60);
       return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
     }
 
     function relativeTime(value) {
-      if (!value) return '—';
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return String(value);
+      const raw = normalizeScalar(value);
+      if (!raw) return '—';
+      const date = new Date(raw);
+      if (Number.isNaN(date.getTime())) return String(raw);
       const diff = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
       if (diff < 60) return `${diff}s ago`;
       if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
@@ -313,9 +327,10 @@
     }
 
     function fullTime(value) {
-      if (!value) return '—';
-      const date = new Date(value);
-      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+      const raw = normalizeScalar(value);
+      if (!raw) return '—';
+      const date = new Date(raw);
+      return Number.isNaN(date.getTime()) ? String(raw) : date.toLocaleString();
     }
 
     function normalizeStatus(value) {
