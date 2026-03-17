@@ -109,10 +109,10 @@
       border: 1px solid rgba(180,35,24,0.14);
     }
     .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-    .card { padding: 16px; border-radius: 16px; background: #fff; border: 1px solid rgba(19,51,39,0.08); }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .card { min-width: 0; padding: 16px; border-radius: 16px; background: #fff; border: 1px solid rgba(19,51,39,0.08); overflow: hidden; }
     .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
-    .value { font-size: 1.9rem; font-weight: 700; line-height: 1; margin-bottom: 6px; }
+    .value { font-size: 1.9rem; font-weight: 700; line-height: 1.1; margin-bottom: 6px; overflow-wrap: anywhere; }
     .productive .value { color: var(--green); }
     .nonproductive .value { color: var(--amber); }
     .idle .value { color: var(--blue); }
@@ -121,8 +121,8 @@
     .bar-top { display: flex; justify-content: space-between; gap: 12px; font-size: 0.93rem; }
     .track { height: 12px; border-radius: 999px; overflow: hidden; background: rgba(19,51,39,0.08); }
     .fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #218a56, #6cad78); }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 12px 10px; text-align: left; border-bottom: 1px solid rgba(19,51,39,0.08); vertical-align: top; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { min-width: 0; padding: 12px 10px; text-align: left; border-bottom: 1px solid rgba(19,51,39,0.08); vertical-align: top; overflow-wrap: anywhere; word-break: break-word; }
     th { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
     .pill { display: inline-flex; padding: 6px 10px; border-radius: 999px; font-size: 0.82rem; font-weight: 700; }
     .pill.productive { color: var(--green); background: rgba(33,138,86,0.1); }
@@ -132,9 +132,19 @@
     .feed-item { padding: 14px; border-radius: 14px; background: #fff; border: 1px solid rgba(19,51,39,0.08); }
     .feed-top { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
     .feed-title { font-weight: 700; }
-    .small { font-size: 0.88rem; color: var(--muted); }
-    .url { margin-top: 8px; font-size: 0.88rem; color: var(--muted); word-break: break-all; }
+    .small { font-size: 0.88rem; color: var(--muted); overflow-wrap: anywhere; word-break: break-word; }
+    .url { margin-top: 8px; font-size: 0.88rem; color: var(--muted); overflow-wrap: anywhere; word-break: break-word; }
+    .agent-id { font-weight: 700; }
+    .agent-url, .feed-page { margin-top: 4px; }
+    .agent-url, .feed-page, .url { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+    .agent-url, .url { -webkit-line-clamp: 2; }
+    .feed-page { -webkit-line-clamp: 2; }
     .empty { padding: 22px; text-align: center; border: 1px dashed rgba(19,51,39,0.16); border-radius: 14px; color: var(--muted); background: rgba(255,255,255,0.45); }
+    th:nth-child(1), td:nth-child(1) { width: 30%; }
+    th:nth-child(2), td:nth-child(2) { width: 14%; }
+    th:nth-child(3), td:nth-child(3) { width: 18%; }
+    th:nth-child(4), td:nth-child(4) { width: 24%; }
+    th:nth-child(5), td:nth-child(5) { width: 14%; }
     @media (max-width: 1120px) {
       .hero, .grid { grid-template-columns: 1fr; }
       .controls { grid-template-columns: repeat(2, 1fr); }
@@ -277,7 +287,9 @@
       ws: null,
       reconnectTimer: null,
       reconnectAttempts: 0,
-      shouldStayConnected: true
+      shouldStayConnected: true,
+      snapshot: null,
+      liveEvents: []
     };
 
     function todayString() {
@@ -305,13 +317,200 @@
       return value;
     }
 
+    function normalizeText(value) {
+      const raw = normalizeScalar(value);
+      return raw === null || raw === undefined ? '' : String(raw);
+    }
+
     function formatDuration(seconds) {
       const total = Number(normalizeScalar(seconds) || 0);
       if (!Number.isFinite(total) || total <= 0) return '0m';
       if (total < 60) return `${Math.round(total)}s`;
       const hours = Math.floor(total / 3600);
       const minutes = Math.floor((total % 3600) / 60);
-      return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+      const remainingSeconds = Math.floor(total % 60);
+      if (hours > 0) {
+        return remainingSeconds > 0 ? `${hours}h ${minutes}m ${remainingSeconds}s` : `${hours}h ${minutes}m`;
+      }
+      return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+    }
+
+    function formatAgentToday(row) {
+      const productive = Number(normalizeScalar(row.productive_seconds_today) || 0);
+      const nonProductive = Number(normalizeScalar(row.non_productive_seconds_today) || 0);
+      const idle = Number(normalizeScalar(row.idle_seconds_today) || 0);
+
+      if (productive <= 0 && nonProductive <= 0 && idle <= 0) {
+        return 'No completed activity today';
+      }
+
+      const parts = [
+        `${formatDuration(productive)} productive`,
+        `${formatDuration(nonProductive)} non-productive`
+      ];
+
+      if (idle > 0) {
+        parts.push(`${formatDuration(idle)} idle`);
+      }
+
+      return parts.join(' • ');
+    }
+
+    function compactUrl(value) {
+      const raw = normalizeText(value).trim();
+      if (!raw) return '';
+
+      try {
+        const parsed = new URL(raw);
+        const compact = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+        return compact.length > 120 ? `${compact.slice(0, 117)}...` : compact;
+      } catch (error) {
+        return raw.length > 120 ? `${raw.slice(0, 117)}...` : raw;
+      }
+    }
+
+    function normalizeSnapshotActivity(item) {
+      return {
+        event_kind: item.event_kind || 'activity_log',
+        event_id: item.event_id || null,
+        id: item.id || null,
+        agent_id: normalizeText(item.agent_id),
+        activity_type: normalizeText(item.activity_type),
+        sub_category: normalizeText(item.sub_category),
+        url: normalizeText(item.url),
+        page_title: normalizeText(item.page_title),
+        start_time: normalizeText(item.start_time),
+        end_time: normalizeText(item.end_time),
+        duration_seconds: Number(normalizeScalar(item.duration_seconds) || 0),
+        manually_categorized: !!item.manually_categorized,
+        logged_at: normalizeScalar(item.logged_at),
+        current_status: normalizeText(item.current_status),
+        current_activity: normalizeText(item.current_activity),
+        current_url: normalizeText(item.current_url)
+      };
+    }
+
+    function currentAgentMatchesFilters(agent) {
+      const search = el.agentSearch.value.trim().toLowerCase();
+      const status = el.agentStatus.value;
+      const agentId = normalizeText(agent.agent_id).toLowerCase();
+      const currentStatus = normalizeText(agent.current_status).toUpperCase();
+
+      if (search && !agentId.includes(search)) {
+        return false;
+      }
+
+      if (status && currentStatus !== status) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function buildFeedItems(snapshotActivities) {
+      const snapshotShiftDate = normalizeText(state.snapshot?.filters?.shift_date);
+      const includeLiveEvents = !snapshotShiftDate || snapshotShiftDate === todayString();
+      const combined = [
+        ...(includeLiveEvents ? state.liveEvents : []),
+        ...(snapshotActivities || []).map(normalizeSnapshotActivity)
+      ];
+
+      combined.sort((a, b) => {
+        const aTime = new Date(normalizeScalar(a.logged_at) || 0).getTime() || 0;
+        const bTime = new Date(normalizeScalar(b.logged_at) || 0).getTime() || 0;
+        return bTime - aTime;
+      });
+
+      const seen = new Set();
+      const items = [];
+
+      for (const item of combined) {
+        const key = item.id
+          ? `activity:${item.id}`
+          : item.event_id || `${item.event_kind}:${item.agent_id}:${item.activity_type}:${normalizeText(item.logged_at)}`;
+
+        if (seen.has(key)) {
+          continue;
+        }
+
+        seen.add(key);
+        items.push(item);
+
+        if (items.length >= 25) {
+          break;
+        }
+      }
+
+      return items;
+    }
+
+    function renderDashboardState(reason, generatedAt) {
+      const snapshot = state.snapshot || {};
+      renderSummary(snapshot);
+      renderTopSubcategories(snapshot.top_subcategories || []);
+      renderAgents(snapshot.agents || []);
+      renderFeed(buildFeedItems(snapshot.activities || []));
+      el.lastUpdated.textContent = `Snapshot received ${fullTime(generatedAt)} • reason: ${reason || 'initial'}`;
+      setConnectionState('connected', 'Socket connected', `Subscribed via ${getSocketUrl().startsWith('wss:') ? 'wss' : 'ws'} to ${getSocketUrl()}`);
+    }
+
+    function upsertLiveAgent(agentPayload) {
+      if (!state.snapshot || !Array.isArray(state.snapshot.agents)) {
+        return;
+      }
+
+      const nextAgent = {
+        agent_id: normalizeText(agentPayload.agent_id),
+        current_status: normalizeText(agentPayload.current_status || agentPayload.activity_type || 'UNKNOWN'),
+        current_activity: normalizeText(agentPayload.current_activity || agentPayload.sub_category),
+        current_url: normalizeText(agentPayload.current_url || agentPayload.url),
+        status_updated_at: normalizeScalar(agentPayload.status_updated_at || agentPayload.logged_at),
+        last_seen: normalizeScalar(agentPayload.last_seen || agentPayload.logged_at),
+        productive_seconds_today: 0,
+        non_productive_seconds_today: 0,
+        idle_seconds_today: 0,
+        activity_count_today: 0
+      };
+
+      const existingIndex = state.snapshot.agents.findIndex((agent) => normalizeText(agent.agent_id) === nextAgent.agent_id);
+      if (existingIndex >= 0) {
+        state.snapshot.agents[existingIndex] = {
+          ...state.snapshot.agents[existingIndex],
+          ...nextAgent
+        };
+      } else if (currentAgentMatchesFilters(nextAgent)) {
+        state.snapshot.agents.unshift(nextAgent);
+      }
+
+      state.snapshot.agents = state.snapshot.agents
+        .filter(currentAgentMatchesFilters)
+        .sort((a, b) => {
+          const aTime = new Date(normalizeScalar(a.last_seen) || 0).getTime() || 0;
+          const bTime = new Date(normalizeScalar(b.last_seen) || 0).getTime() || 0;
+          return bTime - aTime;
+        })
+        .slice(0, state.snapshot.filters?.limit || 100);
+    }
+
+    function applyDashboardEvent(eventType, payload, generatedAt) {
+      const normalizedPayload = normalizeSnapshotActivity(payload || {});
+
+      if (eventType === 'agent_status') {
+        upsertLiveAgent(normalizedPayload);
+      }
+
+      state.liveEvents.unshift(normalizedPayload);
+      state.liveEvents = state.liveEvents.slice(0, 30);
+
+      if (state.snapshot) {
+        renderSummary(state.snapshot);
+        renderTopSubcategories(state.snapshot.top_subcategories || []);
+        renderAgents(state.snapshot.agents || []);
+        renderFeed(buildFeedItems(state.snapshot.activities || []));
+      }
+
+      el.lastUpdated.textContent = `Live event received ${fullTime(generatedAt)} • ${eventType}`;
+      setConnectionState('connected', 'Socket connected', `Live ${eventType.replace('_', ' ')} received`);
     }
 
     function relativeTime(value) {
@@ -448,21 +647,22 @@
         const tr = document.createElement('tr');
         const tdAgent = document.createElement('td');
         const id = document.createElement('div');
-        id.style.fontWeight = '700';
-        id.textContent = row.agent_id || 'UNKNOWN';
+        id.className = 'agent-id';
+        id.textContent = normalizeText(row.agent_id) || 'UNKNOWN';
         const url = document.createElement('div');
-        url.className = 'small';
-        url.textContent = row.current_url || 'No current URL';
+        url.className = 'small agent-url';
+        url.title = normalizeText(row.current_url) || 'No current URL';
+        url.textContent = compactUrl(row.current_url) || 'No current URL';
         tdAgent.append(id, url);
         const tdStatus = document.createElement('td');
         const pill = document.createElement('span');
         pill.className = `pill ${normalizeStatus(row.current_status)}`;
-        pill.textContent = row.current_status || 'UNKNOWN';
+        pill.textContent = normalizeText(row.current_status) || 'UNKNOWN';
         tdStatus.appendChild(pill);
         const tdActivity = document.createElement('td');
-        tdActivity.textContent = row.current_activity || '—';
+        tdActivity.textContent = normalizeText(row.current_activity) || '—';
         const tdToday = document.createElement('td');
-        tdToday.textContent = `${formatDuration(row.productive_seconds_today)} productive / ${formatDuration(row.non_productive_seconds_today)} non-productive`;
+        tdToday.textContent = formatAgentToday(row);
         const tdSeen = document.createElement('td');
         tdSeen.textContent = relativeTime(row.last_seen);
         tr.append(tdAgent, tdStatus, tdActivity, tdToday, tdSeen);
@@ -487,25 +687,31 @@
         top.className = 'feed-top';
         const title = document.createElement('div');
         title.className = 'feed-title';
-        title.textContent = `${item.agent_id} • ${item.activity_type}`;
+        title.textContent = `${normalizeText(item.agent_id)} • ${normalizeText(item.activity_type)}`;
         const when = document.createElement('div');
         when.className = 'small';
         when.textContent = relativeTime(item.logged_at);
         const detail = document.createElement('div');
         detail.className = 'small';
-        detail.textContent = `${item.sub_category || 'UNSPECIFIED'} • ${formatDuration(item.duration_seconds)} • ${item.manually_categorized ? 'manual' : 'auto'}`;
+        if (item.event_kind === 'agent_status') {
+          detail.textContent = `${normalizeText(item.sub_category) || 'STATUS_UPDATE'} • live status update`;
+        } else {
+          detail.textContent = `${normalizeText(item.sub_category) || 'UNSPECIFIED'} • ${formatDuration(item.duration_seconds)} • ${item.manually_categorized ? 'manual' : 'auto'}`;
+        }
         top.append(title, when);
         node.append(top, detail);
         if (item.page_title) {
           const page = document.createElement('div');
-          page.style.marginTop = '8px';
-          page.textContent = item.page_title;
+          page.className = 'feed-page';
+          page.title = normalizeText(item.page_title);
+          page.textContent = normalizeText(item.page_title);
           node.appendChild(page);
         }
         if (item.url) {
           const url = document.createElement('div');
           url.className = 'url';
-          url.textContent = item.url;
+          url.title = normalizeText(item.url);
+          url.textContent = compactUrl(item.url);
           node.appendChild(url);
         }
         el.activityFeed.appendChild(node);
@@ -513,12 +719,8 @@
     }
 
     function renderSnapshot(snapshot, reason, generatedAt) {
-      renderSummary(snapshot);
-      renderTopSubcategories(snapshot.top_subcategories || []);
-      renderAgents(snapshot.agents || []);
-      renderFeed(snapshot.activities || []);
-      el.lastUpdated.textContent = `Snapshot received ${fullTime(generatedAt)} • reason: ${reason || 'initial'}`;
-      setConnectionState('connected', 'Socket connected', `Subscribed via ${getSocketUrl().startsWith('wss:') ? 'wss' : 'ws'} to ${getSocketUrl()}`);
+      state.snapshot = snapshot || {};
+      renderDashboardState(reason, generatedAt);
     }
 
     function saveKey() {
@@ -615,6 +817,12 @@
           return;
         }
 
+        if (message.type === 'dashboard_event') {
+          setBanner('');
+          applyDashboardEvent(message.event || 'event', message.payload || {}, message.generated_at || new Date().toISOString());
+          return;
+        }
+
         if (message.type === 'dashboard_error') {
           setBanner(message.error || 'Dashboard snapshot failed.');
           return;
@@ -644,6 +852,7 @@
     }
 
     function onFilterChange() {
+      state.liveEvents = [];
       if (state.ws && state.ws.readyState === WebSocket.OPEN) {
         subscribeDashboard();
       }

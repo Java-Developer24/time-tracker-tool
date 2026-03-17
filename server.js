@@ -164,6 +164,10 @@ function getDashboardDateParam(value) {
   return new Date().toISOString().slice(0, 10);
 }
 
+function toBigQueryDateParam(value) {
+  return bigquery.date(getDashboardDateParam(value));
+}
+
 function getSinceTimestamp(minutes) {
   return new Date(Date.now() - (minutes * 60 * 1000));
 }
@@ -488,6 +492,34 @@ function serializeDashboardActivity(row) {
   };
 }
 
+function serializeDashboardStatusEvent(row) {
+  const loggedAt = toIsoOrNull(row.status_updated_at || row.last_seen);
+  return {
+    event_kind: 'agent_status',
+    event_id: `agent_status:${row.agent_id || 'unknown'}:${loggedAt || nowISO()}`,
+    agent_id: row.agent_id,
+    activity_type: row.current_status || 'UNKNOWN',
+    sub_category: row.current_activity || '',
+    url: row.current_url || '',
+    page_title: row.current_activity ? `Live status change: ${row.current_activity}` : 'Live status change',
+    duration_seconds: 0,
+    manually_categorized: false,
+    logged_at: loggedAt,
+    current_status: row.current_status || 'UNKNOWN',
+    current_activity: row.current_activity || '',
+    current_url: row.current_url || '',
+    status_updated_at: toIsoOrNull(row.status_updated_at),
+    last_seen: toIsoOrNull(row.last_seen)
+  };
+}
+
+function serializeDashboardActivityEvent(row) {
+  return {
+    event_kind: 'activity_log',
+    ...serializeDashboardActivity(row)
+  };
+}
+
 function getDashboardSummaryFilters(input = {}) {
   const shiftDate = getDashboardDateParam(input.date || input.shift_date);
   const windowMinutes = parseBoundedInt(input.window_minutes, 60, 5, 1440);
@@ -590,16 +622,13 @@ async function getDashboardSummaryData(input = {}) {
 
   const [summaryRows, topCategories] = await Promise.all([
     runDashboardQuery(summaryQuery, {
-      shift_date: filters.shift_date,
+      shift_date: toBigQueryDateParam(filters.shift_date),
       since_ts: filters.since_ts
     }, {
-      shift_date: 'DATE',
       since_ts: 'TIMESTAMP'
     }),
     runDashboardQuery(topCategoriesQuery, {
-      shift_date: filters.shift_date
-    }, {
-      shift_date: 'DATE'
+      shift_date: toBigQueryDateParam(filters.shift_date)
     })
   ]);
 
@@ -658,12 +687,11 @@ async function getDashboardAgentsData(input = {}) {
   `;
 
   const rows = await runDashboardQuery(query, {
-    shift_date: filters.shift_date,
+    shift_date: toBigQueryDateParam(filters.shift_date),
     status_filter: filters.status,
     search_term: filters.search ? filters.search.toLowerCase() : null,
     limit: filters.limit
   }, {
-    shift_date: 'DATE',
     status_filter: 'STRING',
     search_term: 'STRING',
     limit: 'INT64'
@@ -1013,6 +1041,7 @@ app.get('/api/dashboard/activity-feed', requireApiKey, async (req, res) => {
 app.post('/api/activity-logs', requireApiKey, async (req, res) => {
   try {
     const row = await upsertActivityLog(req.body || {});
+    broadcastDashboardEvent('activity_log', row);
     broadcastDashboardSnapshots('activity_log');
     logInfo(`[API] /api/activity-logs OK id=${row.id}`);
     res.json({ success: true, id: row.id });
@@ -1025,7 +1054,8 @@ app.post('/api/activity-logs', requireApiKey, async (req, res) => {
 app.post('/api/agent-status', requireApiKey, async (req, res) => {
   try {
     const agentId = String(req.body?.agent_id || '').trim() || 'UNKNOWN';
-    await upsertAgentStatus(req.body || {});
+    const row = await upsertAgentStatus(req.body || {});
+    broadcastDashboardEvent('agent_status', row);
     broadcastDashboardSnapshots('agent_status');
     logInfo(`[API] /api/agent-status OK agent=${agentId}`);
     res.json({ success: true });
@@ -1130,7 +1160,7 @@ function scheduleDashboardSnapshot(ws, reason) {
     sendDashboardSnapshot(ws, reason).catch((err) => {
       logError(`[WS] dashboard push error id=${ws.clientId}:`, err.message);
     });
-  }, 300);
+  }, 150);
 }
 
 function broadcastDashboardSnapshots(reason) {
@@ -1143,6 +1173,29 @@ function broadcastDashboardSnapshots(reason) {
       return;
     }
     scheduleDashboardSnapshot(client, reason);
+  });
+}
+
+function broadcastDashboardEvent(eventType, row) {
+  if (!dashboardWss || !row) {
+    return;
+  }
+
+  const payload = eventType === 'agent_status'
+    ? serializeDashboardStatusEvent(row)
+    : serializeDashboardActivityEvent(row);
+
+  dashboardWss.clients.forEach((client) => {
+    if (!client.isAuthenticated || !client.dashboardSubscription) {
+      return;
+    }
+
+    safeWsSend(client, {
+      type: 'dashboard_event',
+      event: eventType,
+      generated_at: nowISO(),
+      payload
+    });
   });
 }
 
@@ -1204,6 +1257,7 @@ function setupWebSocketServer(server) {
       try {
         if (message.type === 'activity_log') {
           const row = await upsertActivityLog(message.payload || {});
+          broadcastDashboardEvent('activity_log', row);
           broadcastDashboardSnapshots('activity_log');
           logVerbose(`[WS] activity_log ingested id=${ws.clientId} activityId=${row.id}`);
           safeWsSend(ws, { type: 'ack', id: messageId, event: 'activity_log', success: true, activity_id: row.id });
@@ -1211,7 +1265,8 @@ function setupWebSocketServer(server) {
         }
 
         if (message.type === 'agent_status') {
-          await upsertAgentStatus(message.payload || {});
+          const row = await upsertAgentStatus(message.payload || {});
+          broadcastDashboardEvent('agent_status', row);
           broadcastDashboardSnapshots('agent_status');
           logVerbose(`[WS] agent_status ingested id=${ws.clientId}`);
           safeWsSend(ws, { type: 'ack', id: messageId, event: 'agent_status', success: true });
