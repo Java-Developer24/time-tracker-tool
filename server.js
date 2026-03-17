@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const https = require('https');
+const path = require('path');
 const crypto = require('crypto');
 const { BigQuery } = require('@google-cloud/bigquery');
 const { WebSocketServer } = require('ws');
@@ -10,6 +11,7 @@ const { WebSocketServer } = require('ws');
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
 const API_KEY = process.env.API_KEY;
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -144,6 +146,48 @@ function requireApiKey(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
+}
+
+function parseBoundedInt(value, fallback, min, max) {
+  const parsed = parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function getDashboardDateParam(value) {
+  const raw = String(value || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return raw;
+  }
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getSinceTimestamp(minutes) {
+  return new Date(Date.now() - (minutes * 60 * 1000));
+}
+
+function normalizeDashboardStatus(value) {
+  const status = normalizeOptionalString(value);
+  if (!status) return null;
+
+  const upper = status.toUpperCase();
+  if (upper === 'PRODUCTIVE' || upper === 'NON_PRODUCTIVE' || upper === 'IDLE') {
+    return upper;
+  }
+  return null;
+}
+
+function toSafeNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function toIsoOrNull(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
 }
 
 function splitCSVLine(line) {
@@ -380,6 +424,322 @@ async function runBigQueryHealthCheck() {
   logVerbose('[BQ] Health check query succeeded');
 }
 
+async function runDashboardQuery(query, params, types) {
+  const [rows] = await bigquery.query({
+    query,
+    location: BQ_LOCATION,
+    params: params || {},
+    types: types || {}
+  });
+  return rows;
+}
+
+function serializeDashboardAgent(row) {
+  return {
+    agent_id: row.agent_id,
+    current_status: row.current_status || 'UNKNOWN',
+    current_activity: row.current_activity || '',
+    current_url: row.current_url || '',
+    status_updated_at: toIsoOrNull(row.status_updated_at),
+    last_seen: toIsoOrNull(row.last_seen),
+    productive_seconds_today: toSafeNumber(row.productive_seconds_today),
+    non_productive_seconds_today: toSafeNumber(row.non_productive_seconds_today),
+    idle_seconds_today: toSafeNumber(row.idle_seconds_today),
+    activity_count_today: toSafeNumber(row.activity_count_today)
+  };
+}
+
+function serializeDashboardActivity(row) {
+  return {
+    id: row.id,
+    agent_id: row.agent_id,
+    activity_type: row.activity_type,
+    sub_category: row.sub_category || '',
+    url: row.url || '',
+    page_title: row.page_title || '',
+    start_time: toIsoOrNull(row.start_time),
+    end_time: toIsoOrNull(row.end_time),
+    duration_seconds: toSafeNumber(row.duration_seconds),
+    manually_categorized: !!row.manually_categorized,
+    logged_at: toIsoOrNull(row.logged_at)
+  };
+}
+
+function getDashboardSummaryFilters(input = {}) {
+  const shiftDate = getDashboardDateParam(input.date || input.shift_date);
+  const windowMinutes = parseBoundedInt(input.window_minutes, 60, 5, 1440);
+  return {
+    shift_date: shiftDate,
+    window_minutes: windowMinutes,
+    since_ts: getSinceTimestamp(windowMinutes)
+  };
+}
+
+function getDashboardAgentsFilters(input = {}) {
+  return {
+    shift_date: getDashboardDateParam(input.date || input.shift_date),
+    status: normalizeDashboardStatus(input.status),
+    search: normalizeOptionalString(input.search),
+    limit: parseBoundedInt(input.limit, 100, 1, 500)
+  };
+}
+
+function getDashboardActivityFeedFilters(input = {}) {
+  const limit = parseBoundedInt(input.limit, 50, 1, 200);
+  const windowMinutes = parseBoundedInt(input.window_minutes, 180, 5, 10080);
+  const activityType = normalizeOptionalString(input.activity_type);
+
+  return {
+    agent_id: normalizeOptionalString(input.agent_id),
+    activity_type: activityType ? activityType.toUpperCase() : null,
+    window_minutes: windowMinutes,
+    limit,
+    since_ts: getSinceTimestamp(windowMinutes)
+  };
+}
+
+function getDashboardSubscriptionFilters(input = {}) {
+  const windowMinutes = parseBoundedInt(input.window_minutes, 60, 5, 1440);
+  return {
+    shift_date: getDashboardDateParam(input.date || input.shift_date),
+    window_minutes: windowMinutes,
+    status: normalizeDashboardStatus(input.status),
+    search: normalizeOptionalString(input.search),
+    limit: parseBoundedInt(input.limit, 100, 1, 500),
+    activity_limit: parseBoundedInt(input.activity_limit, 25, 1, 200),
+    activity_window_minutes: parseBoundedInt(
+      input.activity_window_minutes,
+      Math.max(windowMinutes, 180),
+      5,
+      10080
+    )
+  };
+}
+
+async function getDashboardSummaryData(input = {}) {
+  const filters = getDashboardSummaryFilters(input);
+
+  const summaryQuery = `
+    WITH current_status AS (
+      SELECT
+        COUNT(*) AS total_agents,
+        COUNTIF(UPPER(COALESCE(current_status, '')) = 'PRODUCTIVE') AS productive_agents,
+        COUNTIF(UPPER(COALESCE(current_status, '')) = 'NON_PRODUCTIVE') AS non_productive_agents,
+        COUNTIF(UPPER(COALESCE(current_status, '')) = 'IDLE') AS idle_agents,
+        COUNTIF(last_seen >= @since_ts) AS agents_seen_in_window,
+        MAX(last_seen) AS latest_agent_seen_at
+      FROM ${tableRef(BQ_STATUS_TABLE)}
+    ),
+    day_activity AS (
+      SELECT
+        COUNT(*) AS activity_count_today,
+        COALESCE(SUM(duration_seconds), 0) AS total_duration_seconds_today,
+        COALESCE(SUM(IF(activity_type = 'PRODUCTIVE', duration_seconds, 0)), 0) AS productive_seconds_today,
+        COALESCE(SUM(IF(activity_type = 'NON_PRODUCTIVE', duration_seconds, 0)), 0) AS non_productive_seconds_today,
+        COALESCE(SUM(IF(activity_type = 'IDLE', duration_seconds, 0)), 0) AS idle_seconds_today,
+        COALESCE(MAX(logged_at), MAX(start_time)) AS latest_activity_at
+      FROM ${tableRef(BQ_ACTIVITY_TABLE)}
+      WHERE DATE(start_time) = @shift_date
+    ),
+    recent_activity AS (
+      SELECT
+        COUNT(*) AS activity_count_in_window
+      FROM ${tableRef(BQ_ACTIVITY_TABLE)}
+      WHERE logged_at >= @since_ts
+    )
+    SELECT *
+    FROM current_status
+    CROSS JOIN day_activity
+    CROSS JOIN recent_activity
+  `;
+
+  const topCategoriesQuery = `
+    SELECT
+      COALESCE(sub_category, 'UNSPECIFIED') AS sub_category,
+      COUNT(*) AS event_count,
+      COALESCE(SUM(duration_seconds), 0) AS total_duration_seconds
+    FROM ${tableRef(BQ_ACTIVITY_TABLE)}
+    WHERE DATE(start_time) = @shift_date
+    GROUP BY sub_category
+    ORDER BY total_duration_seconds DESC, event_count DESC
+    LIMIT 6
+  `;
+
+  const [summaryRows, topCategories] = await Promise.all([
+    runDashboardQuery(summaryQuery, {
+      shift_date: filters.shift_date,
+      since_ts: filters.since_ts
+    }, {
+      shift_date: 'DATE',
+      since_ts: 'TIMESTAMP'
+    }),
+    runDashboardQuery(topCategoriesQuery, {
+      shift_date: filters.shift_date
+    }, {
+      shift_date: 'DATE'
+    })
+  ]);
+
+  const row = summaryRows[0] || {};
+  return {
+    filters: {
+      shift_date: filters.shift_date,
+      window_minutes: filters.window_minutes
+    },
+    summary: {
+      total_agents: toSafeNumber(row.total_agents),
+      productive_agents: toSafeNumber(row.productive_agents),
+      non_productive_agents: toSafeNumber(row.non_productive_agents),
+      idle_agents: toSafeNumber(row.idle_agents),
+      agents_seen_in_window: toSafeNumber(row.agents_seen_in_window),
+      activity_count_today: toSafeNumber(row.activity_count_today),
+      activity_count_in_window: toSafeNumber(row.activity_count_in_window),
+      total_duration_seconds_today: toSafeNumber(row.total_duration_seconds_today),
+      productive_seconds_today: toSafeNumber(row.productive_seconds_today),
+      non_productive_seconds_today: toSafeNumber(row.non_productive_seconds_today),
+      idle_seconds_today: toSafeNumber(row.idle_seconds_today),
+      latest_agent_seen_at: toIsoOrNull(row.latest_agent_seen_at),
+      latest_activity_at: toIsoOrNull(row.latest_activity_at)
+    },
+    top_subcategories: topCategories.map((item) => ({
+      sub_category: item.sub_category || 'UNSPECIFIED',
+      event_count: toSafeNumber(item.event_count),
+      total_duration_seconds: toSafeNumber(item.total_duration_seconds)
+    }))
+  };
+}
+
+async function getDashboardAgentsData(input = {}) {
+  const filters = getDashboardAgentsFilters(input);
+
+  const query = `
+    SELECT
+      s.agent_id,
+      COALESCE(s.current_status, 'UNKNOWN') AS current_status,
+      COALESCE(s.current_activity, '') AS current_activity,
+      COALESCE(s.current_url, '') AS current_url,
+      s.status_updated_at,
+      s.last_seen,
+      COALESCE(d.productive_seconds, 0) AS productive_seconds_today,
+      COALESCE(d.non_productive_seconds, 0) AS non_productive_seconds_today,
+      COALESCE(d.idle_seconds, 0) AS idle_seconds_today,
+      COALESCE(d.record_count, 0) AS activity_count_today
+    FROM ${tableRef(BQ_STATUS_TABLE)} AS s
+    LEFT JOIN ${viewRef(BQ_DAILY_SUMMARY_VIEW)} AS d
+      ON d.agent_id = s.agent_id
+     AND d.shift_date = @shift_date
+    WHERE (@status_filter IS NULL OR UPPER(s.current_status) = @status_filter)
+      AND (@search_term IS NULL OR LOWER(s.agent_id) LIKE CONCAT('%', @search_term, '%'))
+    ORDER BY s.last_seen DESC
+    LIMIT @limit
+  `;
+
+  const rows = await runDashboardQuery(query, {
+    shift_date: filters.shift_date,
+    status_filter: filters.status,
+    search_term: filters.search ? filters.search.toLowerCase() : null,
+    limit: filters.limit
+  }, {
+    shift_date: 'DATE',
+    status_filter: 'STRING',
+    search_term: 'STRING',
+    limit: 'INT64'
+  });
+
+  return {
+    filters: {
+      shift_date: filters.shift_date,
+      status: filters.status,
+      search: filters.search || null,
+      limit: filters.limit
+    },
+    agents: rows.map(serializeDashboardAgent)
+  };
+}
+
+async function getDashboardActivityFeedData(input = {}) {
+  const filters = getDashboardActivityFeedFilters(input);
+
+  const query = `
+    SELECT
+      id,
+      agent_id,
+      activity_type,
+      COALESCE(sub_category, '') AS sub_category,
+      COALESCE(url, '') AS url,
+      COALESCE(page_title, '') AS page_title,
+      start_time,
+      end_time,
+      COALESCE(duration_seconds, 0) AS duration_seconds,
+      manually_categorized,
+      logged_at
+    FROM ${tableRef(BQ_ACTIVITY_TABLE)}
+    WHERE logged_at >= @since_ts
+      AND (@agent_id IS NULL OR agent_id = @agent_id)
+      AND (@activity_type IS NULL OR UPPER(activity_type) = @activity_type)
+    ORDER BY logged_at DESC
+    LIMIT @limit
+  `;
+
+  const rows = await runDashboardQuery(query, {
+    since_ts: filters.since_ts,
+    agent_id: filters.agent_id,
+    activity_type: filters.activity_type,
+    limit: filters.limit
+  }, {
+    since_ts: 'TIMESTAMP',
+    agent_id: 'STRING',
+    activity_type: 'STRING',
+    limit: 'INT64'
+  });
+
+  return {
+    filters: {
+      agent_id: filters.agent_id,
+      activity_type: filters.activity_type,
+      window_minutes: filters.window_minutes,
+      limit: filters.limit
+    },
+    activities: rows.map(serializeDashboardActivity)
+  };
+}
+
+async function getDashboardSnapshotData(input = {}) {
+  const subscription = getDashboardSubscriptionFilters(input);
+  const [summaryData, agentsData, activityFeedData] = await Promise.all([
+    getDashboardSummaryData({
+      shift_date: subscription.shift_date,
+      window_minutes: subscription.window_minutes
+    }),
+    getDashboardAgentsData({
+      shift_date: subscription.shift_date,
+      status: subscription.status,
+      search: subscription.search,
+      limit: subscription.limit
+    }),
+    getDashboardActivityFeedData({
+      window_minutes: subscription.activity_window_minutes,
+      limit: subscription.activity_limit
+    })
+  ]);
+
+  return {
+    filters: {
+      shift_date: subscription.shift_date,
+      window_minutes: subscription.window_minutes,
+      status: subscription.status,
+      search: subscription.search || null,
+      limit: subscription.limit,
+      activity_limit: subscription.activity_limit,
+      activity_window_minutes: subscription.activity_window_minutes
+    },
+    summary: summaryData.summary,
+    top_subcategories: summaryData.top_subcategories,
+    agents: agentsData.agents,
+    activities: activityFeedData.activities
+  };
+}
+
 async function upsertActivityLog(activity) {
   const row = {
     id: normalizeOptionalString(activity.id) || crypto.randomUUID(),
@@ -483,7 +843,7 @@ async function upsertActivityLog(activity) {
   });
 
   logVerbose(`[BQ] Activity upsert OK id=${row.id} agent=${row.agent_id} type=${row.activity_type}`);
-  return row.id;
+  return row;
 }
 
 async function upsertAgentStatus(status) {
@@ -553,7 +913,18 @@ async function upsertAgentStatus(status) {
   });
 
   logVerbose(`[BQ] Agent status upsert OK agent=${row.agent_id} status=${row.current_status || 'UNKNOWN'}`);
+  return row;
 }
+
+app.get('/test', (req, res) => {
+  logVerbose('[API] /test OK');
+  res.json({
+    status: 'ok',
+    message: 'Backend is running',
+    timestamp: nowISO(),
+    uptime_seconds: Math.floor(process.uptime())
+  });
+});
 
 app.get('/health', async (req, res) => {
   try {
@@ -570,11 +941,58 @@ app.get('/health', async (req, res) => {
   }
 });
 
+app.get('/dashboard', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard-sample.html'));
+});
+
+app.get('/api/dashboard/summary', requireApiKey, async (req, res) => {
+  try {
+    const data = await getDashboardSummaryData(req.query || {});
+    res.json({
+      success: true,
+      generated_at: nowISO(),
+      ...data
+    });
+  } catch (err) {
+    logError('[API] /api/dashboard/summary error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/dashboard/agents', requireApiKey, async (req, res) => {
+  try {
+    const data = await getDashboardAgentsData(req.query || {});
+    res.json({
+      success: true,
+      generated_at: nowISO(),
+      ...data
+    });
+  } catch (err) {
+    logError('[API] /api/dashboard/agents error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/dashboard/activity-feed', requireApiKey, async (req, res) => {
+  try {
+    const data = await getDashboardActivityFeedData(req.query || {});
+    res.json({
+      success: true,
+      generated_at: nowISO(),
+      ...data
+    });
+  } catch (err) {
+    logError('[API] /api/dashboard/activity-feed error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/api/activity-logs', requireApiKey, async (req, res) => {
   try {
-    const id = await upsertActivityLog(req.body || {});
-    logInfo(`[API] /api/activity-logs OK id=${id}`);
-    res.json({ success: true, id });
+    const row = await upsertActivityLog(req.body || {});
+    broadcastDashboardSnapshots('activity_log');
+    logInfo(`[API] /api/activity-logs OK id=${row.id}`);
+    res.json({ success: true, id: row.id });
   } catch (err) {
     logError('[API] /api/activity-logs error:', err.message);
     res.status(500).json({ error: err.message });
@@ -585,6 +1003,7 @@ app.post('/api/agent-status', requireApiKey, async (req, res) => {
   try {
     const agentId = String(req.body?.agent_id || '').trim() || 'UNKNOWN';
     await upsertAgentStatus(req.body || {});
+    broadcastDashboardSnapshots('agent_status');
     logInfo(`[API] /api/agent-status OK agent=${agentId}`);
     res.json({ success: true });
   } catch (err) {
@@ -648,15 +1067,74 @@ function safeWsSend(ws, payload) {
   }
 }
 
+let dashboardWss = null;
+
+async function sendDashboardSnapshot(ws, reason, messageId) {
+  if (!ws || ws.readyState !== 1 || !ws.isAuthenticated || !ws.dashboardSubscription) {
+    return;
+  }
+
+  try {
+    const snapshot = await getDashboardSnapshotData(ws.dashboardSubscription);
+    safeWsSend(ws, {
+      type: 'dashboard_snapshot',
+      id: messageId || null,
+      reason,
+      generated_at: nowISO(),
+      payload: snapshot
+    });
+  } catch (err) {
+    logError(`[WS] dashboard snapshot error id=${ws.clientId}:`, err.message);
+    safeWsSend(ws, {
+      type: 'dashboard_error',
+      id: messageId || null,
+      error: err.message || 'dashboard_snapshot_failed'
+    });
+  }
+}
+
+function scheduleDashboardSnapshot(ws, reason) {
+  if (!ws || !ws.dashboardSubscription) {
+    return;
+  }
+
+  if (ws.dashboardSnapshotTimer) {
+    clearTimeout(ws.dashboardSnapshotTimer);
+  }
+
+  ws.dashboardSnapshotTimer = setTimeout(() => {
+    ws.dashboardSnapshotTimer = null;
+    sendDashboardSnapshot(ws, reason).catch((err) => {
+      logError(`[WS] dashboard push error id=${ws.clientId}:`, err.message);
+    });
+  }, 300);
+}
+
+function broadcastDashboardSnapshots(reason) {
+  if (!dashboardWss) {
+    return;
+  }
+
+  dashboardWss.clients.forEach((client) => {
+    if (!client.isAuthenticated || !client.dashboardSubscription) {
+      return;
+    }
+    scheduleDashboardSnapshot(client, reason);
+  });
+}
+
 let wsClientSequence = 0;
 
 function setupWebSocketServer(server) {
   const wss = new WebSocketServer({ server, path: '/ws' });
+  dashboardWss = wss;
 
   wss.on('connection', (ws, req) => {
     ws.clientId = ++wsClientSequence;
     ws.isAlive = true;
     ws.isAuthenticated = false;
+    ws.dashboardSubscription = null;
+    ws.dashboardSnapshotTimer = null;
     const remoteIp = req?.socket?.remoteAddress || 'unknown';
     logInfo(`[WS] Client connected id=${ws.clientId} ip=${remoteIp}`);
 
@@ -702,16 +1180,36 @@ function setupWebSocketServer(server) {
 
       try {
         if (message.type === 'activity_log') {
-          const id = await upsertActivityLog(message.payload || {});
-          logVerbose(`[WS] activity_log ingested id=${ws.clientId} activityId=${id}`);
-          safeWsSend(ws, { type: 'ack', id: messageId, event: 'activity_log', success: true, activity_id: id });
+          const row = await upsertActivityLog(message.payload || {});
+          broadcastDashboardSnapshots('activity_log');
+          logVerbose(`[WS] activity_log ingested id=${ws.clientId} activityId=${row.id}`);
+          safeWsSend(ws, { type: 'ack', id: messageId, event: 'activity_log', success: true, activity_id: row.id });
           return;
         }
 
         if (message.type === 'agent_status') {
           await upsertAgentStatus(message.payload || {});
+          broadcastDashboardSnapshots('agent_status');
           logVerbose(`[WS] agent_status ingested id=${ws.clientId}`);
           safeWsSend(ws, { type: 'ack', id: messageId, event: 'agent_status', success: true });
+          return;
+        }
+
+        if (message.type === 'subscribe_dashboard') {
+          ws.dashboardSubscription = getDashboardSubscriptionFilters(message.payload || {});
+          logInfo(`[WS] dashboard subscribed id=${ws.clientId}`);
+          await sendDashboardSnapshot(ws, 'subscribed', messageId);
+          return;
+        }
+
+        if (message.type === 'unsubscribe_dashboard') {
+          if (ws.dashboardSnapshotTimer) {
+            clearTimeout(ws.dashboardSnapshotTimer);
+            ws.dashboardSnapshotTimer = null;
+          }
+          ws.dashboardSubscription = null;
+          logInfo(`[WS] dashboard unsubscribed id=${ws.clientId}`);
+          safeWsSend(ws, { type: 'dashboard_unsubscribed', id: messageId, ts: nowISO() });
           return;
         }
 
@@ -734,6 +1232,9 @@ function setupWebSocketServer(server) {
     });
 
     ws.on('close', (code, reasonBuffer) => {
+      if (ws.dashboardSnapshotTimer) {
+        clearTimeout(ws.dashboardSnapshotTimer);
+      }
       const reason = reasonBuffer ? reasonBuffer.toString() : '';
       logInfo(`[WS] Client disconnected id=${ws.clientId} code=${code} reason=${reason || 'none'}`);
     });

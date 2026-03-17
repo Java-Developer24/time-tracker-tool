@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Time Tracker Monitor</title>
+  <style>
+    :root {
+      --bg: linear-gradient(180deg, #f5faf6 0%, #eaf1ed 100%);
+      --panel: rgba(255,255,255,0.88);
+      --border: rgba(19,51,39,0.12);
+      --text: #183126;
+      --muted: #607166;
+      --green: #218a56;
+      --amber: #b96a22;
+      --blue: #4f6983;
+      --danger: #b42318;
+      --shadow: 0 18px 40px rgba(20,56,42,0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Trebuchet MS", "Gill Sans", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at top left, rgba(33,138,86,0.14), transparent 30%), radial-gradient(circle at top right, rgba(38,91,139,0.12), transparent 28%), var(--bg);
+    }
+    .shell { width: min(1380px, calc(100vw - 28px)); margin: 0 auto; padding: 24px 0 42px; }
+    .hero, .grid { display: grid; gap: 18px; }
+    .hero { grid-template-columns: 1.35fr 1fr; margin-bottom: 18px; }
+    .grid { grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr); }
+    .stack { display: grid; gap: 18px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+      padding: 20px;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(2rem, 4vw, 3.1rem);
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+    h2 { margin: 0; font-size: 1.1rem; }
+    p, .muted { color: var(--muted); line-height: 1.5; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(19,51,39,0.06);
+      font-size: 0.92rem;
+      width: fit-content;
+    }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 0 5px rgba(33,138,86,0.12);
+    }
+    .dot.connecting { background: var(--amber); box-shadow: 0 0 0 5px rgba(185,106,34,0.12); }
+    .dot.disconnected { background: var(--danger); box-shadow: 0 0 0 5px rgba(180,35,24,0.12); }
+    .dot.connected { background: var(--green); box-shadow: 0 0 0 5px rgba(33,138,86,0.12); }
+    .controls {
+      display: grid;
+      grid-template-columns: 2fr repeat(4, 1fr) auto;
+      gap: 12px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+    .field { display: grid; gap: 6px; }
+    label {
+      font-size: 0.82rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+    input, select, button {
+      font: inherit;
+      color: var(--text);
+      border-radius: 12px;
+      border: 1px solid rgba(19,51,39,0.12);
+      padding: 12px 14px;
+      background: rgba(255,255,255,0.94);
+    }
+    input:focus, select:focus {
+      outline: 2px solid rgba(33,138,86,0.18);
+      border-color: rgba(33,138,86,0.35);
+    }
+    button { cursor: pointer; font-weight: 700; }
+    .primary { color: #fff; background: linear-gradient(135deg, #218a56, #2d7a97); }
+    .secondary { background: rgba(255,255,255,0.92); }
+    .check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.92rem; }
+    .check input { width: 18px; height: 18px; padding: 0; }
+    .banner {
+      display: none;
+      padding: 12px 16px;
+      margin-bottom: 18px;
+      border-radius: 14px;
+      color: var(--danger);
+      background: rgba(180,35,24,0.08);
+      border: 1px solid rgba(180,35,24,0.14);
+    }
+    .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .card { padding: 16px; border-radius: 16px; background: #fff; border: 1px solid rgba(19,51,39,0.08); }
+    .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+    .value { font-size: 1.9rem; font-weight: 700; line-height: 1; margin-bottom: 6px; }
+    .productive .value { color: var(--green); }
+    .nonproductive .value { color: var(--amber); }
+    .idle .value { color: var(--blue); }
+    .bars, .feed { display: grid; gap: 12px; }
+    .bar-row { display: grid; gap: 6px; }
+    .bar-top { display: flex; justify-content: space-between; gap: 12px; font-size: 0.93rem; }
+    .track { height: 12px; border-radius: 999px; overflow: hidden; background: rgba(19,51,39,0.08); }
+    .fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #218a56, #6cad78); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 12px 10px; text-align: left; border-bottom: 1px solid rgba(19,51,39,0.08); vertical-align: top; }
+    th { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .pill { display: inline-flex; padding: 6px 10px; border-radius: 999px; font-size: 0.82rem; font-weight: 700; }
+    .pill.productive { color: var(--green); background: rgba(33,138,86,0.1); }
+    .pill.non_productive { color: var(--amber); background: rgba(185,106,34,0.1); }
+    .pill.idle { color: var(--blue); background: rgba(79,105,131,0.12); }
+    .pill.unknown { color: var(--muted); background: rgba(96,113,102,0.12); }
+    .feed-item { padding: 14px; border-radius: 14px; background: #fff; border: 1px solid rgba(19,51,39,0.08); }
+    .feed-top { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+    .feed-title { font-weight: 700; }
+    .small { font-size: 0.88rem; color: var(--muted); }
+    .url { margin-top: 8px; font-size: 0.88rem; color: var(--muted); word-break: break-all; }
+    .empty { padding: 22px; text-align: center; border: 1px dashed rgba(19,51,39,0.16); border-radius: 14px; color: var(--muted); background: rgba(255,255,255,0.45); }
+    @media (max-width: 1120px) {
+      .hero, .grid { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 720px) {
+      .shell { width: min(100vw - 20px, 100%); padding-top: 18px; }
+      .controls, .cards { grid-template-columns: 1fr; }
+      th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <div class="panel">
+        <div class="chip">Internal monitor</div>
+        <h1>Live Team Activity Dashboard</h1>
+        <p>This sample page is now socket-driven. It authenticates to the existing `/ws` endpoint, subscribes to dashboard data, receives a BigQuery-backed snapshot, and then gets live pushed refreshes whenever activity or agent status changes land on the server.</p>
+      </div>
+      <aside class="panel">
+        <div class="chip"><span id="statusDot" class="dot disconnected"></span><span id="liveLabel">Socket disconnected</span></div>
+        <p class="muted" id="lastUpdated">No dashboard snapshot received yet.</p>
+        <p class="muted" id="socketMeta">Waiting for API key and socket connection.</p>
+      </aside>
+    </section>
+
+    <section class="panel controls">
+      <div class="field">
+        <label for="apiKey">API key</label>
+        <input id="apiKey" type="password" placeholder="Enter backend x-api-key">
+      </div>
+      <div class="field">
+        <label for="shiftDate">Date</label>
+        <input id="shiftDate" type="date">
+      </div>
+      <div class="field">
+        <label for="windowMinutes">Window minutes</label>
+        <input id="windowMinutes" type="number" min="5" max="1440" value="60">
+      </div>
+      <div class="field">
+        <label for="agentStatus">Status</label>
+        <select id="agentStatus">
+          <option value="">All</option>
+          <option value="PRODUCTIVE">Productive</option>
+          <option value="NON_PRODUCTIVE">Non-productive</option>
+          <option value="IDLE">Idle</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="agentSearch">Agent search</label>
+        <input id="agentSearch" type="text" placeholder="Search by agent id">
+      </div>
+      <div class="field" style="gap:10px;">
+        <button id="connectBtn" class="primary" type="button">Connect / Refresh</button>
+        <button id="saveKeyBtn" class="secondary" type="button">Save key</button>
+        <label class="check"><input id="autoReconnect" type="checkbox" checked>Auto reconnect</label>
+      </div>
+    </section>
+
+    <div id="errorBanner" class="banner"></div>
+
+    <section class="grid">
+      <div class="stack">
+        <section class="panel">
+          <div class="head">
+            <h2>Operational Summary</h2>
+            <div class="muted" id="summaryMeta">Today</div>
+          </div>
+          <div id="summaryCards" class="cards"></div>
+        </section>
+
+        <section class="panel">
+          <div class="head">
+            <h2>Agents</h2>
+            <div class="muted" id="agentCount">0 records</div>
+          </div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Agent</th>
+                  <th>Status</th>
+                  <th>Current activity</th>
+                  <th>Today</th>
+                  <th>Last seen</th>
+                </tr>
+              </thead>
+              <tbody id="agentsTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="panel">
+          <div class="head">
+            <h2>Top Subcategories</h2>
+            <div class="muted">By duration</div>
+          </div>
+          <div id="subcategoryBars" class="bars"></div>
+        </section>
+
+        <section class="panel">
+          <div class="head">
+            <h2>Recent Activity Feed</h2>
+            <div class="muted" id="feedCount">0 events</div>
+          </div>
+          <div id="activityFeed" class="feed"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const STORAGE_KEY = 'dashboardApiKey';
+    const el = {
+      apiKey: document.getElementById('apiKey'),
+      shiftDate: document.getElementById('shiftDate'),
+      windowMinutes: document.getElementById('windowMinutes'),
+      agentStatus: document.getElementById('agentStatus'),
+      agentSearch: document.getElementById('agentSearch'),
+      autoReconnect: document.getElementById('autoReconnect'),
+      connectBtn: document.getElementById('connectBtn'),
+      saveKeyBtn: document.getElementById('saveKeyBtn'),
+      errorBanner: document.getElementById('errorBanner'),
+      statusDot: document.getElementById('statusDot'),
+      liveLabel: document.getElementById('liveLabel'),
+      lastUpdated: document.getElementById('lastUpdated'),
+      socketMeta: document.getElementById('socketMeta'),
+      summaryMeta: document.getElementById('summaryMeta'),
+      summaryCards: document.getElementById('summaryCards'),
+      subcategoryBars: document.getElementById('subcategoryBars'),
+      agentsTable: document.getElementById('agentsTable'),
+      agentCount: document.getElementById('agentCount'),
+      activityFeed: document.getElementById('activityFeed'),
+      feedCount: document.getElementById('feedCount')
+    };
+
+    const state = {
+      ws: null,
+      reconnectTimer: null,
+      reconnectAttempts: 0,
+      shouldStayConnected: true
+    };
+
+    function todayString() {
+      return new Date().toISOString().slice(0, 10);
+    }
+
+    function getApiKey() {
+      return el.apiKey.value.trim();
+    }
+
+    function setBanner(message) {
+      el.errorBanner.style.display = message ? 'block' : 'none';
+      el.errorBanner.textContent = message || '';
+    }
+
+    function formatDuration(seconds) {
+      const total = Number(seconds || 0);
+      if (!Number.isFinite(total) || total <= 0) return '0m';
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+    }
+
+    function relativeTime(value) {
+      if (!value) return '—';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      const diff = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+      if (diff < 60) return `${diff}s ago`;
+      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+      if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+      return `${Math.floor(diff / 86400)}d ago`;
+    }
+
+    function fullTime(value) {
+      if (!value) return '—';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+    }
+
+    function normalizeStatus(value) {
+      const status = String(value || '').toLowerCase();
+      if (status === 'productive') return 'productive';
+      if (status === 'non_productive') return 'non_productive';
+      if (status === 'idle') return 'idle';
+      return 'unknown';
+    }
+
+    function nextMessageId(prefix) {
+      return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    function getSocketUrl() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${protocol}//${window.location.host}/ws`;
+    }
+
+    function setConnectionState(mode, text, meta) {
+      el.statusDot.className = `dot ${mode}`.trim();
+      el.liveLabel.textContent = text;
+      if (meta) {
+        el.socketMeta.textContent = meta;
+      }
+    }
+
+    function currentSubscription() {
+      const windowMinutes = Math.max(5, Math.min(Number(el.windowMinutes.value || 60), 1440));
+      return {
+        shift_date: el.shiftDate.value || todayString(),
+        window_minutes: windowMinutes,
+        status: el.agentStatus.value || null,
+        search: el.agentSearch.value.trim() || null,
+        limit: 100,
+        activity_limit: 25,
+        activity_window_minutes: Math.max(windowMinutes, 180)
+      };
+    }
+
+    function renderSummary(snapshot) {
+      const summary = snapshot.summary || {};
+      const filters = snapshot.filters || {};
+      const cards = [
+        ['Agents online', summary.total_agents || 0, `${summary.agents_seen_in_window || 0} active in last ${filters.window_minutes || 60}m`, ''],
+        ['Productive now', summary.productive_agents || 0, `${formatDuration(summary.productive_seconds_today)} logged today`, 'productive'],
+        ['Non-productive now', summary.non_productive_agents || 0, `${formatDuration(summary.non_productive_seconds_today)} logged today`, 'nonproductive'],
+        ['Idle now', summary.idle_agents || 0, `${formatDuration(summary.idle_seconds_today)} logged today`, 'idle'],
+        ['Events today', summary.activity_count_today || 0, `${summary.activity_count_in_window || 0} in current window`, ''],
+        ['Tracked today', formatDuration(summary.total_duration_seconds_today), `Latest activity ${relativeTime(summary.latest_activity_at)}`, '']
+      ];
+      el.summaryCards.textContent = '';
+      cards.forEach(([label, value, subtext, className]) => {
+        const card = document.createElement('article');
+        card.className = `card ${className}`.trim();
+        const labelNode = document.createElement('div');
+        labelNode.className = 'label';
+        labelNode.textContent = label;
+        const valueNode = document.createElement('div');
+        valueNode.className = 'value';
+        valueNode.textContent = String(value);
+        const subNode = document.createElement('div');
+        subNode.className = 'small';
+        subNode.textContent = subtext;
+        card.append(labelNode, valueNode, subNode);
+        el.summaryCards.appendChild(card);
+      });
+      el.summaryMeta.textContent = `Shift date ${filters.shift_date || todayString()}`;
+    }
+
+    function renderTopSubcategories(items) {
+      el.subcategoryBars.textContent = '';
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = 'No activity rows found for the selected date.';
+        el.subcategoryBars.appendChild(empty);
+        return;
+      }
+      const max = Math.max(...items.map((item) => Number(item.total_duration_seconds || 0)), 1);
+      items.forEach((item) => {
+        const row = document.createElement('div');
+        row.className = 'bar-row';
+        const top = document.createElement('div');
+        top.className = 'bar-top';
+        const left = document.createElement('span');
+        left.textContent = item.sub_category || 'UNSPECIFIED';
+        const right = document.createElement('span');
+        right.textContent = `${formatDuration(item.total_duration_seconds)} • ${item.event_count} events`;
+        const track = document.createElement('div');
+        track.className = 'track';
+        const fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.width = `${Math.max((Number(item.total_duration_seconds || 0) / max) * 100, 6)}%`;
+        track.appendChild(fill);
+        top.append(left, right);
+        row.append(top, track);
+        el.subcategoryBars.appendChild(row);
+      });
+    }
+
+    function renderAgents(items) {
+      el.agentsTable.textContent = '';
+      el.agentCount.textContent = `${items.length} records`;
+      if (!items.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.innerHTML = '<div class="empty">No matching agents for the selected filters.</div>';
+        tr.appendChild(td);
+        el.agentsTable.appendChild(tr);
+        return;
+      }
+      items.forEach((row) => {
+        const tr = document.createElement('tr');
+        const tdAgent = document.createElement('td');
+        const id = document.createElement('div');
+        id.style.fontWeight = '700';
+        id.textContent = row.agent_id || 'UNKNOWN';
+        const url = document.createElement('div');
+        url.className = 'small';
+        url.textContent = row.current_url || 'No current URL';
+        tdAgent.append(id, url);
+        const tdStatus = document.createElement('td');
+        const pill = document.createElement('span');
+        pill.className = `pill ${normalizeStatus(row.current_status)}`;
+        pill.textContent = row.current_status || 'UNKNOWN';
+        tdStatus.appendChild(pill);
+        const tdActivity = document.createElement('td');
+        tdActivity.textContent = row.current_activity || '—';
+        const tdToday = document.createElement('td');
+        tdToday.textContent = `${formatDuration(row.productive_seconds_today)} productive / ${formatDuration(row.non_productive_seconds_today)} non-productive`;
+        const tdSeen = document.createElement('td');
+        tdSeen.textContent = relativeTime(row.last_seen);
+        tr.append(tdAgent, tdStatus, tdActivity, tdToday, tdSeen);
+        el.agentsTable.appendChild(tr);
+      });
+    }
+
+    function renderFeed(items) {
+      el.activityFeed.textContent = '';
+      el.feedCount.textContent = `${items.length} events`;
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = 'No activity events found in the selected time window.';
+        el.activityFeed.appendChild(empty);
+        return;
+      }
+      items.forEach((item) => {
+        const node = document.createElement('article');
+        node.className = 'feed-item';
+        const top = document.createElement('div');
+        top.className = 'feed-top';
+        const title = document.createElement('div');
+        title.className = 'feed-title';
+        title.textContent = `${item.agent_id} • ${item.activity_type}`;
+        const when = document.createElement('div');
+        when.className = 'small';
+        when.textContent = relativeTime(item.logged_at);
+        const detail = document.createElement('div');
+        detail.className = 'small';
+        detail.textContent = `${item.sub_category || 'UNSPECIFIED'} • ${formatDuration(item.duration_seconds)} • ${item.manually_categorized ? 'manual' : 'auto'}`;
+        top.append(title, when);
+        node.append(top, detail);
+        if (item.page_title) {
+          const page = document.createElement('div');
+          page.style.marginTop = '8px';
+          page.textContent = item.page_title;
+          node.appendChild(page);
+        }
+        if (item.url) {
+          const url = document.createElement('div');
+          url.className = 'url';
+          url.textContent = item.url;
+          node.appendChild(url);
+        }
+        el.activityFeed.appendChild(node);
+      });
+    }
+
+    function renderSnapshot(snapshot, reason, generatedAt) {
+      renderSummary(snapshot);
+      renderTopSubcategories(snapshot.top_subcategories || []);
+      renderAgents(snapshot.agents || []);
+      renderFeed(snapshot.activities || []);
+      el.lastUpdated.textContent = `Snapshot received ${fullTime(generatedAt)} • reason: ${reason || 'initial'}`;
+      setConnectionState('connected', 'Socket connected', `Subscribed via ${getSocketUrl().startsWith('wss:') ? 'wss' : 'ws'} to ${getSocketUrl()}`);
+    }
+
+    function saveKey() {
+      const key = getApiKey();
+      if (key) localStorage.setItem(STORAGE_KEY, key);
+      else localStorage.removeItem(STORAGE_KEY);
+    }
+
+    function sendMessage(payload) {
+      if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+      state.ws.send(JSON.stringify(payload));
+      return true;
+    }
+
+    function subscribeDashboard() {
+      return sendMessage({
+        type: 'subscribe_dashboard',
+        id: nextMessageId('dashboard'),
+        payload: currentSubscription()
+      });
+    }
+
+    function clearReconnectTimer() {
+      if (state.reconnectTimer) {
+        clearTimeout(state.reconnectTimer);
+        state.reconnectTimer = null;
+      }
+    }
+
+    function scheduleReconnect() {
+      clearReconnectTimer();
+      if (!state.shouldStayConnected || !el.autoReconnect.checked || !getApiKey()) {
+        return;
+      }
+      state.reconnectAttempts += 1;
+      const delay = Math.min(1000 * Math.pow(2, state.reconnectAttempts - 1), 10000);
+      setConnectionState('connecting', 'Reconnecting socket', `Retrying in ${Math.round(delay / 1000)}s`);
+      state.reconnectTimer = setTimeout(() => {
+        connectSocket();
+      }, delay);
+    }
+
+    function connectSocket() {
+      saveKey();
+      setBanner('');
+
+      if (!getApiKey()) {
+        setBanner('Enter the backend API key first.');
+        setConnectionState('disconnected', 'Socket disconnected', 'API key missing.');
+        return;
+      }
+
+      state.shouldStayConnected = true;
+      clearReconnectTimer();
+
+      if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
+        subscribeDashboard();
+        return;
+      }
+
+      const ws = new WebSocket(getSocketUrl());
+      state.ws = ws;
+      setConnectionState('connecting', 'Connecting socket', `Opening ${getSocketUrl()}`);
+
+      ws.addEventListener('open', () => {
+        state.reconnectAttempts = 0;
+        sendMessage({
+          type: 'auth',
+          id: nextMessageId('auth'),
+          api_key: getApiKey()
+        });
+      });
+
+      ws.addEventListener('message', (event) => {
+        let message = null;
+        try {
+          message = JSON.parse(event.data);
+        } catch (error) {
+          setBanner('Received invalid WebSocket payload from server.');
+          return;
+        }
+
+        if (message.type === 'auth_ok') {
+          setConnectionState('connecting', 'Socket authenticated', 'Requesting dashboard snapshot.');
+          subscribeDashboard();
+          return;
+        }
+
+        if (message.type === 'dashboard_snapshot') {
+          setBanner('');
+          renderSnapshot(message.payload || {}, message.reason || 'snapshot', message.generated_at || new Date().toISOString());
+          return;
+        }
+
+        if (message.type === 'dashboard_error') {
+          setBanner(message.error || 'Dashboard snapshot failed.');
+          return;
+        }
+
+        if (message.type === 'error') {
+          setBanner(message.error || 'WebSocket request failed.');
+          return;
+        }
+
+        if (message.type === 'pong') {
+          return;
+        }
+      });
+
+      ws.addEventListener('close', (event) => {
+        if (state.ws === ws) {
+          state.ws = null;
+        }
+        setConnectionState('disconnected', 'Socket disconnected', `Close code ${event.code || 'unknown'}`);
+        scheduleReconnect();
+      });
+
+      ws.addEventListener('error', () => {
+        setConnectionState('disconnected', 'Socket error', 'The connection failed before a snapshot was received.');
+      });
+    }
+
+    function onFilterChange() {
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        subscribeDashboard();
+      }
+    }
+
+    function init() {
+      el.shiftDate.value = todayString();
+      el.apiKey.value = localStorage.getItem(STORAGE_KEY) || '';
+
+      el.saveKeyBtn.addEventListener('click', () => {
+        saveKey();
+        setBanner('');
+      });
+
+      el.connectBtn.addEventListener('click', () => {
+        connectSocket();
+      });
+
+      el.autoReconnect.addEventListener('change', () => {
+        if (el.autoReconnect.checked) {
+          scheduleReconnect();
+        } else {
+          clearReconnectTimer();
+        }
+      });
+
+      ['shiftDate', 'windowMinutes', 'agentStatus', 'agentSearch'].forEach((id) => {
+        el[id].addEventListener('change', onFilterChange);
+      });
+
+      el.agentSearch.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          onFilterChange();
+        }
+      });
+
+      if (getApiKey()) {
+        connectSocket();
+      } else {
+        setBanner('Enter the backend API key, then connect the dashboard socket.');
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
